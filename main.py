@@ -10,6 +10,8 @@ from email_utils import (
 )
 import psycopg2.extras
 from contextlib import asynccontextmanager
+import uvicorn
+import os
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -18,14 +20,16 @@ async def lifespan(app: FastAPI):
     try:
         app.state.conn = connect_db()
         create_tables(app.state.conn)
-        app.state.cur = app.state.conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        app.state.cur = app.state.conn.cursor()
         print("Database connected and cursor created.")
         yield
     finally:
         # Shutdown code
         print("Shutting down...")
-        app.state.cur.close()
-        app.state.conn.close()
+        if hasattr(app.state, 'cur') and app.state.cur:
+            app.state.cur.close()
+        if hasattr(app.state, 'conn') and app.state.conn:
+            app.state.conn.close()
         print("Database connection closed.")
 
 app = FastAPI(lifespan=lifespan)
@@ -71,3 +75,10 @@ async def process_emails():
         app.state.conn.rollback()
         print(f"An error occurred: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get('PORT', 8000))
+    uvicorn.run("main:app", host='0.0.0.0', port=port, reload=True)

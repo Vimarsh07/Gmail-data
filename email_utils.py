@@ -11,21 +11,23 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 import pickle
+import os
+from dotenv import load_dotenv
+import psycopg2
+from psycopg2.extras import DictCursor
 
-# Database connection parameters
-DB_HOST = "localhost"
-DB_NAME = "email-db"
-DB_USER = "postgres"
-DB_PASS = "vimarsh1234"
+load_dotenv()
+
 
 def connect_db():
     try:
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            database=DB_NAME,
-            user=DB_USER,
-            password=DB_PASS
-        )
+        # Read the DATABASE_URL environment variable
+        DATABASE_URL = os.getenv('DATABASE_URL')
+        if not DATABASE_URL:
+            raise ValueError("DATABASE_URL environment variable not set.")
+
+        # Connect to the PostgreSQL database using the DATABASE_URL
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=DictCursor)
         print("Database connected successfully.")
         return conn
     except Exception as e:

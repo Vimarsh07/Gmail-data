@@ -13,10 +13,10 @@ import re  # For regex matching
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
 # Database connection parameters
-DB_HOST = "localhost"
-DB_NAME = "email-db"
-DB_USER = "postgres"
-DB_PASS = "vimarsh1234"
+DB_HOST = "dpg-cru4bvtumphs73ehka9g-a"
+DB_NAME = "email_db_jrfg"
+DB_USER = "local"
+DB_PASS = "mL6vCsYl9MPYZrpOkaWdFKQRUfLcUZy1"
 
 def connect_db():
     conn = psycopg2.connect(

@@ -6,14 +6,35 @@ from typing import List
 import psycopg2
 import psycopg2.extras
 import os
-from datetime import datetime, timedelta
 from email_utils import (
     create_tables,
     process_email_message,
     get_gmail_service
 )
+from contextlib import asynccontextmanager  # Import asynccontextmanager
 
-app = FastAPI()
+# Define the lifespan context manager
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup code
+    try:
+        print("Application startup: Creating tables.")
+        DATABASE_URL = os.getenv('DATABASE_URL')
+        if not DATABASE_URL:
+            raise ValueError("DATABASE_URL environment variable not set.")
+        conn = psycopg2.connect(DATABASE_URL)
+        create_tables(conn)
+        conn.close()
+        print("Tables created or verified successfully.")
+    except Exception as e:
+        print(f"Startup error: {e}")
+        raise e
+    yield  # Yield control back to FastAPI
+    # Shutdown code (if any)
+    print("Application shutdown.")
+
+# Pass the lifespan function to FastAPI
+app = FastAPI(lifespan=lifespan)
 
 # Database dependency (same as before)
 def get_db_conn():
@@ -25,22 +46,6 @@ def get_db_conn():
         yield conn
     finally:
         conn.close()
-
-# Ensure tables are created at startup (same as before)
-@app.on_event("startup")
-def startup_event():
-    try:
-        # Create a temporary connection to create tables
-        DATABASE_URL = os.getenv('DATABASE_URL')
-        if not DATABASE_URL:
-            raise ValueError("DATABASE_URL environment variable not set.")
-        conn = psycopg2.connect(DATABASE_URL)
-        create_tables(conn)
-        conn.close()
-        print("Startup: Tables created or verified successfully.")
-    except Exception as e:
-        print(f"Startup error: {e}")
-        raise e
 
 # Define Pydantic model for attachments (same as before)
 class AttachmentInfo(BaseModel):
@@ -57,7 +62,8 @@ def process_emails(conn=Depends(get_db_conn)):
         print("Gmail service initialized.")
 
         # Calculate the date one month ago
-        one_month_ago = datetime.now() - timedelta(days=30)
+        from datetime import datetime, timedelta
+        one_month_ago = datetime.utcnow() - timedelta(days=30)
         date_str = one_month_ago.strftime('%Y/%m/%d')
 
         # Build the query to fetch emails from the past month
@@ -135,7 +141,7 @@ def get_attachments(conn=Depends(get_db_conn)):
         print(f"An error occurred: {e}")
         raise HTTPException(status_code=500, detail="Internal server error.")
 
-# Add the Uvicorn startup code here (if needed)
+# Uvicorn startup code (if running locally)
 if __name__ == "__main__":
     import uvicorn
 

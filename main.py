@@ -130,3 +130,10 @@ def get_attachments(conn=Depends(get_db_conn)):
         raise HTTPException(status_code=500, detail="Internal server error.")
     finally:
         conn.close()
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.environ.get('PORT', 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)

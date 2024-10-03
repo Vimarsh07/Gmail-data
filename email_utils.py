@@ -7,32 +7,9 @@ import psycopg2
 import re
 import psycopg2.extras
 from googleapiclient.discovery import build
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
+from google_auth_oauthlib.flow import InstalledAppFlow
 import pickle
-import os
-from dotenv import load_dotenv
-import psycopg2
-from psycopg2.extras import DictCursor
-
-load_dotenv()
-
-
-def connect_db():
-    try:
-        # Read the DATABASE_URL environment variable
-        DATABASE_URL = os.getenv('DATABASE_URL')
-        if not DATABASE_URL:
-            raise ValueError("DATABASE_URL environment variable not set.")
-
-        # Connect to the PostgreSQL database using the DATABASE_URL
-        conn = psycopg2.connect(DATABASE_URL, cursor_factory=DictCursor)
-        print("Database connected successfully.")
-        return conn
-    except Exception as e:
-        print(f"Error connecting to the database: {e}")
-        raise e
 
 def create_tables(conn):
     try:
@@ -62,7 +39,7 @@ def create_tables(conn):
         conn.rollback()
         raise e
 
-def get_attachment(service, user_id, msg_id, attachment_id, filename, mime_type, cur, email_id):
+def get_attachment(service, user_id, msg_id, attachment_id, filename, mime_type, conn, email_id):
     """Get and store an attachment from a message into the database."""
     try:
         attachment = service.users().messages().attachments().get(
@@ -77,13 +54,15 @@ def get_attachment(service, user_id, msg_id, attachment_id, filename, mime_type,
             INSERT INTO attachments (email_id, filename, mime_type, data)
             VALUES (%s, %s, %s, %s)
         """
-        cur.execute(sql, (email_id, filename, mime_type, psycopg2.Binary(file_data)))
+        with conn.cursor() as cur:
+            cur.execute(sql, (email_id, filename, mime_type, psycopg2.Binary(file_data)))
         print(f"Attachment {filename} stored in database.")
     except Exception as e:
         print(f"An error occurred while storing attachment {filename}: {e}")
 
-def process_email_message(service, msg, cur):
+def process_email_message(service, msg, conn):
     try:
+        cur = conn.cursor()
         # Get the message details
         txt = service.users().messages().get(userId='me', id=msg['id'], format='full').execute()
         print(f"Processing message ID: {msg['id']}")
@@ -181,18 +160,22 @@ def process_email_message(service, msg, cur):
                         attachment['attachment_id'],
                         attachment['filename'],
                         attachment['mime_type'],
-                        cur,
+                        conn,
                         email_id
                     )
+                cur.close()
                 return True  # Email was processed and stored
             else:
                 print(f"Email ID {msg['id']} has no PDF or DOC attachments; skipping.")
+                cur.close()
                 return False
         else:
             print(f"Email ID {msg['id']} does not contain the keywords; skipping.")
+            cur.close()
             return False
     except Exception as e:
         print(f"An error occurred while processing message ID {msg['id']}: {e}")
+        cur.close()
         return False
 
 def get_gmail_service():
@@ -211,15 +194,12 @@ def get_gmail_service():
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
                 print("Credentials refreshed.")
+                with open('token.pickle', 'wb') as token:
+                    pickle.dump(creds, token)
+                    print("Credentials updated in token.pickle.")
             else:
-                print("No valid credentials available.")
-                flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-                creds = flow.run_local_server(port=0)
-                print("New credentials obtained.")
-
-            with open('token.pickle', 'wb') as token:
-                pickle.dump(creds, token)
-                print("Credentials saved to token.pickle.")
+                # Cannot proceed without valid credentials
+                raise Exception("No valid credentials available and cannot open browser for authentication.")
 
         service = build('gmail', 'v1', credentials=creds)
         print("Gmail API service built successfully.")

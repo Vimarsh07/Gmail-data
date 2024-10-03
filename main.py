@@ -1,43 +1,56 @@
 # main.py
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
+from pydantic import BaseModel
+from typing import List
 import psycopg2
+import psycopg2.extras
+import os
 from email_utils import (
-    connect_db,
     create_tables,
     process_email_message,
     get_gmail_service
 )
-import psycopg2.extras
-from contextlib import asynccontextmanager
-import uvicorn
-import os
-from pydantic import BaseModel
-from typing import List
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup code
-    print("Starting up...")
+app = FastAPI()
+
+# Database dependency
+def get_db_conn():
     try:
-        app.state.conn = connect_db()
-        create_tables(app.state.conn)
-        app.state.cur = app.state.conn.cursor()
-        print("Database connected and cursor created.")
-        yield
+        DATABASE_URL = os.getenv('DATABASE_URL')
+        if not DATABASE_URL:
+            raise ValueError("DATABASE_URL environment variable not set.")
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.DictCursor)
+        yield conn
     finally:
-        # Shutdown code
-        print("Shutting down...")
-        if hasattr(app.state, 'cur') and app.state.cur:
-            app.state.cur.close()
-        if hasattr(app.state, 'conn') and app.state.conn:
-            app.state.conn.close()
-        print("Database connection closed.")
+        conn.close()
 
-app = FastAPI(lifespan=lifespan)
+# Ensure tables are created at startup
+@app.on_event("startup")
+def startup_event():
+    try:
+        # Create a temporary connection to create tables
+        DATABASE_URL = os.getenv('DATABASE_URL')
+        if not DATABASE_URL:
+            raise ValueError("DATABASE_URL environment variable not set.")
+        conn = psycopg2.connect(DATABASE_URL)
+        create_tables(conn)
+        conn.close()
+        print("Startup: Tables created or verified successfully.")
+    except Exception as e:
+        print(f"Startup error: {e}")
+        raise e
+
+# Define Pydantic model for attachments
+class AttachmentInfo(BaseModel):
+    attachment_id: int
+    email_id: int
+    attachment_name: str
+    sender: str
+    subject: str
 
 @app.post("/process_emails")
-async def process_emails():
+def process_emails(conn=Depends(get_db_conn)):
     try:
         service = get_gmail_service()
         print("Gmail service initialized.")
@@ -63,32 +76,28 @@ async def process_emails():
             return {"status": "success", "processed_emails": 0}
 
         processed_count = 0
+        cur = conn.cursor()
 
         for msg in messages:
-            success = process_email_message(service, msg, app.state.cur)
+            success = process_email_message(service, msg, conn)
             if success:
                 processed_count += 1
 
-        app.state.conn.commit()
+        conn.commit()
+        cur.close()
         print(f"Total emails processed and stored: {processed_count}")
 
         return {"status": "success", "processed_emails": processed_count}
     except Exception as e:
-        app.state.conn.rollback()
+        conn.rollback()
         print(f"An error occurred: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-class AttachmentInfo(BaseModel):
-    attachment_id: int
-    email_id: int
-    attachment_name: str
-    sender: str
-    subject: str
+    finally:
+        conn.close()
 
 @app.get("/attachments", response_model=List[AttachmentInfo])
-async def get_attachments():
+def get_attachments(conn=Depends(get_db_conn)):
     try:
-        # Query the database to get the attachment details
         sql = """
         SELECT
             attachments.id AS attachment_id,
@@ -100,30 +109,24 @@ async def get_attachments():
         JOIN emails ON attachments.email_id = emails.id
         ORDER BY attachments.id;
         """
-        # Use a new cursor to avoid conflicts
-        with app.state.conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        with conn.cursor() as cur:
             cur.execute(sql)
             results = cur.fetchall()
 
-        # Convert the results to a list of AttachmentInfo instances
-        attachments = []
-        for row in results:
-            attachments.append(AttachmentInfo(
+        attachments = [
+            AttachmentInfo(
                 attachment_id=row['attachment_id'],
                 email_id=row['email_id'],
                 attachment_name=row['attachment_name'],
                 sender=row['sender'],
                 subject=row['subject']
-            ))
+            )
+            for row in results
+        ]
 
         return attachments
     except Exception as e:
         print(f"An error occurred: {e}")
         raise HTTPException(status_code=500, detail="Internal server error.")
-
-
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get('PORT', 8000))
-    uvicorn.run("main:app", host='0.0.0.0', port=port, reload=True)
+    finally:
+        conn.close()

@@ -8,7 +8,6 @@ import re
 import psycopg2.extras
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
-from google_auth_oauthlib.flow import InstalledAppFlow
 import pickle
 
 def create_tables(conn):
@@ -29,7 +28,8 @@ def create_tables(conn):
                     email_id INTEGER REFERENCES emails(id),
                     filename TEXT,
                     mime_type TEXT,
-                    data BYTEA
+                    data BYTEA,
+                    UNIQUE (email_id, filename)
                 );
             """)
             conn.commit()
@@ -42,6 +42,18 @@ def create_tables(conn):
 def get_attachment(service, user_id, msg_id, attachment_id, filename, mime_type, conn, email_id):
     """Get and store an attachment from a message into the database."""
     try:
+        # Check if attachment already exists for this email_id and filename
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id FROM attachments WHERE email_id = %s AND filename = %s
+            """, (email_id, filename))
+            existing_attachment = cur.fetchone()
+
+        if existing_attachment:
+            print(f"Attachment {filename} for email ID {email_id} already exists; skipping.")
+            return
+
+        # Proceed to fetch and store the attachment
         attachment = service.users().messages().attachments().get(
             userId=user_id, messageId=msg_id, id=attachment_id
         ).execute()
@@ -53,6 +65,7 @@ def get_attachment(service, user_id, msg_id, attachment_id, filename, mime_type,
         sql = """
             INSERT INTO attachments (email_id, filename, mime_type, data)
             VALUES (%s, %s, %s, %s)
+            ON CONFLICT (email_id, filename) DO NOTHING
         """
         with conn.cursor() as cur:
             cur.execute(sql, (email_id, filename, mime_type, psycopg2.Binary(file_data)))
@@ -62,120 +75,119 @@ def get_attachment(service, user_id, msg_id, attachment_id, filename, mime_type,
 
 def process_email_message(service, msg, conn):
     try:
-        cur = conn.cursor()
-        # Get the message details
-        txt = service.users().messages().get(userId='me', id=msg['id'], format='full').execute()
-        print(f"Processing message ID: {msg['id']}")
+        # Check if the email already exists in the database
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM emails WHERE message_id = %s", (msg['id'],))
+            existing_email = cur.fetchone()
 
-        # Extract payload and headers
-        payload = txt.get('payload', {})
-        headers = payload.get('headers', [])
+        if existing_email:
+            print(f"Email ID {msg['id']} already exists; skipping processing.")
+            return False  # Return False as we didn't process a new email
 
-        # Initialize variables
-        subject = ''
-        sender = ''
-        email_body = ''
+        # Proceed to process the email
+        with conn.cursor() as cur:
+            # Get the message details
+            txt = service.users().messages().get(userId='me', id=msg['id'], format='full').execute()
+            print(f"Processing message ID: {msg['id']}")
 
-        # Extract subject and sender from headers
-        for d in headers:
-            if d.get('name') == 'Subject':
-                subject = d.get('value', '')
-            elif d.get('name') == 'From':
-                sender = d.get('value', '')
+            # Extract payload and headers
+            payload = txt.get('payload', {})
+            headers = payload.get('headers', [])
 
-        # Process message parts
-        body_parts = []
-        attachments_info = []
+            # Initialize variables
+            subject = ''
+            sender = ''
+            email_body = ''
 
-        def process_parts(parts):
-            for part in parts:
-                mime_type = part.get('mimeType')
-                filename = part.get('filename')
-                body_data = part.get('body', {}).get('data')
-                attachment_id = part.get('body', {}).get('attachmentId')
+            # Extract subject and sender from headers
+            for d in headers:
+                if d.get('name') == 'Subject':
+                    subject = d.get('value', '')
+                elif d.get('name') == 'From':
+                    sender = d.get('value', '')
 
-                if 'parts' in part:
-                    process_parts(part['parts'])
-                elif filename and attachment_id:
-                    # This is an attachment
-                    # Check if attachment is pdf or doc
-                    if filename.lower().endswith(('.pdf', '.doc', '.docx')):
-                        # Collect attachment info
-                        attachments_info.append({
-                            'filename': filename,
-                            'mime_type': mime_type,
-                            'attachment_id': attachment_id
-                        })
-                        print(f"Found matching attachment: {filename}")
-                elif body_data:
-                    # This is the email body
+            # Process message parts
+            body_parts = []
+            attachments_info = []
+
+            def process_parts(parts):
+                for part in parts:
+                    mime_type = part.get('mimeType')
+                    filename = part.get('filename')
+                    body_data = part.get('body', {}).get('data')
+                    attachment_id = part.get('body', {}).get('attachmentId')
+
+                    if 'parts' in part:
+                        process_parts(part['parts'])
+                    elif filename and attachment_id:
+                        # This is an attachment
+                        # Check if attachment is pdf or doc
+                        if filename.lower().endswith(('.pdf', '.doc', '.docx')):
+                            # Collect attachment info
+                            attachments_info.append({
+                                'filename': filename,
+                                'mime_type': mime_type,
+                                'attachment_id': attachment_id
+                            })
+                            print(f"Found matching attachment: {filename}")
+                    elif body_data:
+                        # This is the email body
+                        body_data = body_data.replace("-", "+").replace("_", "/")
+                        decoded_data = base64.b64decode(body_data)
+                        if mime_type == 'text/plain':
+                            body_parts.append(decoded_data.decode('utf-8'))
+                        elif mime_type == 'text/html':
+                            soup = BeautifulSoup(decoded_data, "html.parser")
+                            body_parts.append(soup.get_text())
+
+            if 'parts' in payload:
+                process_parts(payload['parts'])
+            else:
+                body_data = payload.get('body', {}).get('data')
+                if body_data:
                     body_data = body_data.replace("-", "+").replace("_", "/")
                     decoded_data = base64.b64decode(body_data)
-                    if mime_type == 'text/plain':
-                        body_parts.append(decoded_data.decode('utf-8'))
-                    elif mime_type == 'text/html':
-                        soup = BeautifulSoup(decoded_data, "html.parser")
-                        body_parts.append(soup.get_text())
+                    email_body += decoded_data.decode('utf-8')
 
-        if 'parts' in payload:
-            process_parts(payload['parts'])
-        else:
-            body_data = payload.get('body', {}).get('data')
-            if body_data:
-                body_data = body_data.replace("-", "+").replace("_", "/")
-                decoded_data = base64.b64decode(body_data)
-                email_body += decoded_data.decode('utf-8')
+            # Combine email body parts
+            if body_parts:
+                email_body = ''.join(body_parts)
 
-        # Combine email body parts
-        if body_parts:
-            email_body = ''.join(body_parts)
-
-        # Check for keywords in email body
-        if re.search(r'\b(resume|cv)\b', email_body, re.IGNORECASE):
-            if attachments_info:
-                # Insert email into database
-                sql = """
-                INSERT INTO emails (message_id, subject, sender, body)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (message_id) DO NOTHING
-                RETURNING id;
-                """
-                cur.execute(sql, (msg['id'], subject, sender, email_body))
-                email_id_row = cur.fetchone()
-                if email_id_row:
+            # Check for keywords in email body
+            if re.search(r'\b(resume|cv)\b', email_body, re.IGNORECASE):
+                if attachments_info:
+                    # Insert email into database
+                    sql = """
+                    INSERT INTO emails (message_id, subject, sender, body)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id;
+                    """
+                    cur.execute(sql, (msg['id'], subject, sender, email_body))
+                    email_id_row = cur.fetchone()
                     email_id = email_id_row[0]
                     print(f"Email inserted with ID: {email_id}")
-                else:
-                    # Email already exists, fetch its id
-                    cur.execute("SELECT id FROM emails WHERE message_id = %s", (msg['id'],))
-                    email_id = cur.fetchone()[0]
-                    print(f"Email already exists with ID: {email_id}")
 
-                # Now store attachments
-                for attachment in attachments_info:
-                    get_attachment(
-                        service,
-                        'me',
-                        msg['id'],
-                        attachment['attachment_id'],
-                        attachment['filename'],
-                        attachment['mime_type'],
-                        conn,
-                        email_id
-                    )
-                cur.close()
-                return True  # Email was processed and stored
+                    # Now store attachments
+                    for attachment in attachments_info:
+                        get_attachment(
+                            service,
+                            'me',
+                            msg['id'],
+                            attachment['attachment_id'],
+                            attachment['filename'],
+                            attachment['mime_type'],
+                            conn,
+                            email_id
+                        )
+                    return True  # Email was processed and stored
+                else:
+                    print(f"Email ID {msg['id']} has no PDF or DOC attachments; skipping.")
+                    return False
             else:
-                print(f"Email ID {msg['id']} has no PDF or DOC attachments; skipping.")
-                cur.close()
+                print(f"Email ID {msg['id']} does not contain the keywords; skipping.")
                 return False
-        else:
-            print(f"Email ID {msg['id']} does not contain the keywords; skipping.")
-            cur.close()
-            return False
     except Exception as e:
         print(f"An error occurred while processing message ID {msg['id']}: {e}")
-        cur.close()
         return False
 
 def get_gmail_service():

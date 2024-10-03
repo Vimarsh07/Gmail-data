@@ -6,12 +6,13 @@ from typing import List
 import psycopg2
 import psycopg2.extras
 import os
+from datetime import datetime, timedelta, timezone
 from email_utils import (
     create_tables,
     process_email_message,
     get_gmail_service
 )
-from contextlib import asynccontextmanager  # Import asynccontextmanager
+from contextlib import asynccontextmanager
 
 # Define the lifespan context manager
 @asynccontextmanager
@@ -36,7 +37,7 @@ async def lifespan(app: FastAPI):
 # Pass the lifespan function to FastAPI
 app = FastAPI(lifespan=lifespan)
 
-# Database dependency (same as before)
+# Database dependency
 def get_db_conn():
     try:
         DATABASE_URL = os.getenv('DATABASE_URL')
@@ -47,7 +48,7 @@ def get_db_conn():
     finally:
         conn.close()
 
-# Define Pydantic model for attachments (same as before)
+# Define Pydantic model for attachments
 class AttachmentInfo(BaseModel):
     attachment_id: int
     email_id: int
@@ -61,12 +62,11 @@ def process_emails(conn=Depends(get_db_conn)):
         service = get_gmail_service()
         print("Gmail service initialized.")
 
-        # Calculate the date one month ago
-        from datetime import datetime, timedelta
-        one_month_ago = datetime.utcnow() - timedelta(days=30)
-        date_str = one_month_ago.strftime('%Y/%m/%d')
+        # Calculate the date six months ago
+        six_months_ago = datetime.now(timezone.utc) - timedelta(days=6*30)  # Approximate 6 months as 180 days
+        date_str = six_months_ago.strftime('%Y/%m/%d')
 
-        # Build the query to fetch emails from the past month
+        # Build the query to fetch emails from the past 6 months
         query = f'has:attachment after:{date_str}'
 
         print(f"Using query: {query}")
@@ -99,7 +99,7 @@ def process_emails(conn=Depends(get_db_conn)):
                 processed_count += 1
 
         conn.commit()
-        print(f"Total emails processed and stored: {processed_count}")
+        print(f"Total new emails processed and stored: {processed_count}")
 
         return {"status": "success", "processed_emails": processed_count}
     except Exception as e:

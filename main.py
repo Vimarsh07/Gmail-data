@@ -12,6 +12,8 @@ import psycopg2.extras
 from contextlib import asynccontextmanager
 import uvicorn
 import os
+from pydantic import BaseModel
+from typing import List
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -75,6 +77,49 @@ async def process_emails():
         app.state.conn.rollback()
         print(f"An error occurred: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+class AttachmentInfo(BaseModel):
+    attachment_id: int
+    email_id: int
+    attachment_name: str
+    sender: str
+    subject: str
+
+@app.get("/attachments", response_model=List[AttachmentInfo])
+async def get_attachments():
+    try:
+        # Query the database to get the attachment details
+        sql = """
+        SELECT
+            attachments.id AS attachment_id,
+            attachments.email_id,
+            attachments.filename AS attachment_name,
+            emails.sender,
+            emails.subject
+        FROM attachments
+        JOIN emails ON attachments.email_id = emails.id
+        ORDER BY attachments.id;
+        """
+        # Use a new cursor to avoid conflicts
+        with app.state.conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(sql)
+            results = cur.fetchall()
+
+        # Convert the results to a list of AttachmentInfo instances
+        attachments = []
+        for row in results:
+            attachments.append(AttachmentInfo(
+                attachment_id=row['attachment_id'],
+                email_id=row['email_id'],
+                attachment_name=row['attachment_name'],
+                sender=row['sender'],
+                subject=row['subject']
+            ))
+
+        return attachments
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error.")
 
 
 
